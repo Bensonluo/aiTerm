@@ -19,7 +19,7 @@ const settingsStore = useSettingsStore()
 
 // Local state for editing
 const localSettings = ref<AppSettings>(JSON.parse(JSON.stringify(settingsStore.settings)))
-const activeTab = ref<'llm' | 'terminal' | 'about'>('llm')
+const activeTab = ref<'llm' | 'terminal' | 'mcp' | 'about'>('llm')
 
 // Ollama state
 const ollamaModels = ref<string[]>([])
@@ -242,8 +242,40 @@ async function saveApiKey(): Promise<void> {
   }
 }
 
+// MCP Server Management
+function addServer(): void {
+  localSettings.value.mcp.servers.push({
+    name: '',
+    command: '',
+    args: [],
+    argsText: '',
+    env: undefined
+  })
+}
+
+function removeServer(index: number): void {
+  localSettings.value.mcp.servers.splice(index, 1)
+}
+
+function addFilesystemServer(): void {
+  localSettings.value.mcp.servers.push({
+    name: 'Filesystem',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+    argsText: '-y @modelcontextprotocol/server-filesystem /tmp',
+    env: undefined
+  })
+}
+
 // Save settings
 async function saveSettings(): Promise<void> {
+  // Convert argsText to args for each MCP server before saving
+  for (const server of localSettings.value.mcp.servers) {
+    if (server.argsText) {
+      server.args = server.argsText.split(/\s+/).filter(arg => arg.length > 0)
+    }
+  }
+
   try {
     // Update store
     settingsStore.settings = JSON.parse(JSON.stringify(localSettings.value))
@@ -283,6 +315,10 @@ function resetToDefaults(): void {
     context: {
       maxLines: 500,
       maxTokens: 4096
+    },
+    mcp: {
+      servers: [],
+      maxIterations: 10
     }
   }
   showStatus('Settings reset to defaults', 'info')
@@ -352,6 +388,12 @@ watch(() => localSettings.value.llm.provider, (newProvider) => {
               @click="activeTab = 'terminal'"
             >
               Terminal
+            </button>
+            <button
+              :class="['tab', { active: activeTab === 'mcp' }]"
+              @click="activeTab = 'mcp'"
+            >
+              MCP
             </button>
             <button
               :class="['tab', { active: activeTab === 'about' }]"
@@ -577,6 +619,81 @@ watch(() => localSettings.value.llm.provider, (newProvider) => {
                       <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
                     </svg>
                     Light
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- MCP Tab -->
+            <div v-show="activeTab === 'mcp'" class="tab-content">
+              <div class="form-group">
+                <label>MCP Servers</label>
+                <p class="hint">Configure MCP servers to enable AI tool capabilities.</p>
+              </div>
+
+              <!-- Server List -->
+              <div class="server-list">
+                <div
+                  v-for="(server, index) in localSettings.mcp.servers"
+                  :key="index"
+                  class="server-item"
+                >
+                  <div class="server-header">
+                    <span class="server-name">{{ server.name || 'Unnamed Server' }}</span>
+                    <button class="remove-server-btn" @click="removeServer(index)" title="Remove server">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                      </svg>
+                    </button>
+                  </div>
+                  <div class="server-config">
+                    <div class="form-group">
+                      <label>Name</label>
+                      <input v-model="server.name" type="text" placeholder="e.g., Filesystem" />
+                    </div>
+                    <div class="form-group">
+                      <label>Command</label>
+                      <input v-model="server.command" type="text" placeholder="e.g., npx" />
+                    </div>
+                    <div class="form-group">
+                      <label>Arguments (space-separated)</label>
+                      <input
+                        v-model="server.argsText"
+                        type="text"
+                        placeholder="-y @modelcontextprotocol/server-filesystem /path/to/directory"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Add Server Button -->
+              <button class="add-server-btn" @click="addServer">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Add MCP Server
+              </button>
+
+              <div class="form-group">
+                <label>Max Tool Call Iterations</label>
+                <input
+                  v-model.number="localSettings.mcp.maxIterations"
+                  type="number"
+                  min="1"
+                  max="20"
+                />
+                <small class="hint">Maximum number of tool calls per AI request (1-20)</small>
+              </div>
+
+              <!-- Preset Templates -->
+              <div class="form-group">
+                <label>Quick Add</label>
+                <div class="preset-buttons">
+                  <button class="preset-btn" @click="addFilesystemServer">
+                    Filesystem
                   </button>
                 </div>
               </div>
@@ -1167,5 +1284,124 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* MCP Server Styles */
+.server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.server-item {
+  background-color: #313244;
+  border: 1px solid #45475a;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.server-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.server-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #cdd6f4;
+}
+
+.remove-server-btn {
+  background: none;
+  border: none;
+  color: #6c7086;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.remove-server-btn:hover {
+  color: #f38ba8;
+  background-color: rgba(243, 139, 168, 0.15);
+}
+
+.server-config {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.server-config .form-group {
+  gap: 4px;
+}
+
+.server-config .form-group label {
+  font-size: 12px;
+}
+
+.server-config input,
+.server-config textarea {
+  background-color: #181825;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #cdd6f4;
+  font-family: 'Menlo', 'Monaco', monospace;
+}
+
+.server-config textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+.add-server-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  background-color: transparent;
+  border: 2px dashed #45475a;
+  border-radius: 8px;
+  color: #6c7086;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-server-btn:hover {
+  border-color: #89b4fa;
+  color: #89b4fa;
+  background-color: rgba(137, 180, 250, 0.1);
+}
+
+.preset-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.preset-btn {
+  padding: 8px 14px;
+  background-color: #313244;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  color: #a6adc8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-btn:hover {
+  background-color: #45475a;
+  color: #cdd6f4;
 }
 </style>

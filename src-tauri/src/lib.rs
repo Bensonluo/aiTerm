@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 pub mod config;
 pub mod context;
 pub mod llm;
+pub mod mcp;
 pub mod pty;
 
 // Re-export PTY commands for convenience
@@ -24,6 +25,9 @@ pub use config::AppConfig;
 
 // Re-export LLM types
 pub use llm::{ChatMessage, LlmClient, LlmProvider};
+
+// Re-export MCP types
+pub use mcp::{McpManager, McpServerConfig, Tool, ToolCall};
 
 // ============================================================================
 // Event Payloads
@@ -72,6 +76,7 @@ pub struct AppState {
     pub config: Mutex<config::AppConfig>,
     pub context: Mutex<context::ContextManager>,
     pub llm: Mutex<Option<llm::LlmClient>>,
+    pub mcp: Mutex<Option<mcp::McpManager>>,
 }
 
 impl Default for AppState {
@@ -83,6 +88,7 @@ impl Default for AppState {
                 config::ContextConfig::default().max_lines,
             )),
             llm: Mutex::new(None),
+            mcp: Mutex::new(None),
         }
     }
 }
@@ -289,16 +295,31 @@ async fn ai_chat(
 
     // Spawn tokio task to stream response
     tokio::spawn(async move {
-        match llm_client.chat_stream(messages).await {
+        match llm_client.chat_stream(messages, None).await {
             Ok(mut stream) => {
                 use futures::StreamExt;
+                use llm::ChatDelta;
 
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
-                        Ok(chunk) => {
-                            // Emit streaming chunk with proper payload structure
-                            if let Err(e) = app_handle.emit("ai_stream", StreamPayload { content: chunk }) {
-                                eprintln!("Failed to emit ai_stream event: {}", e);
+                        Ok(delta) => {
+                            match delta {
+                                ChatDelta::Content(content) => {
+                                    // Emit streaming chunk with proper payload structure
+                                    if let Err(e) = app_handle.emit("ai_stream", StreamPayload { content }) {
+                                        eprintln!("Failed to emit ai_stream event: {}", e);
+                                    }
+                                }
+                                ChatDelta::ToolCall(_tool_call) => {
+                                    // TODO: Handle tool calls via MCP
+                                    // For now, we'll emit an error since tool calling isn't implemented yet
+                                    let _ = app_handle.emit("ai_error", "Tool calls not yet implemented".to_string());
+                                    break;
+                                }
+                                ChatDelta::Done => {
+                                    // Stream finished
+                                    break;
+                                }
                             }
                         }
                         Err(e) => {
@@ -499,6 +520,94 @@ async fn context_summarize(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 // ============================================================================
+// MCP Commands
+// ============================================================================
+
+/// Start MCP servers based on current config
+#[tauri::command]
+async fn mcp_start_servers(state: State<'_, AppState>) -> Result<(), String> {
+    // Get server configs from config (need to drop mutex guard before await)
+    let servers: Vec<mcp::McpServerConfig> = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|_| "Failed to lock config".to_string())?;
+
+        if config.mcp.servers.is_empty() {
+            return Ok(());
+        }
+
+        // Clone server configs and convert to mcp::McpServerConfig
+        config
+            .mcp
+            .servers
+            .iter()
+            .map(|s| mcp::McpServerConfig {
+                name: s.name.clone(),
+                command: s.command.clone(),
+                args: s.args.clone(),
+                env: s.env.clone(),
+            })
+            .collect()
+    }; // config mutex guard dropped here
+
+    // Create MCP manager and connect to servers
+    let manager = mcp::McpManager::new(&servers)
+        .await
+        .map_err(|e| format!("Failed to start MCP servers: {}", e))?;
+
+    let mut mcp_guard = state
+        .mcp
+        .lock()
+        .map_err(|_| "Failed to lock MCP manager".to_string())?;
+
+    *mcp_guard = Some(manager);
+
+    Ok(())
+}
+
+/// Stop all MCP servers
+#[tauri::command]
+fn mcp_stop_servers(state: State<'_, AppState>) -> Result<(), String> {
+    let mut mcp_guard = state
+        .mcp
+        .lock()
+        .map_err(|_| "Failed to lock MCP manager".to_string())?;
+
+    *mcp_guard = None;
+
+    Ok(())
+}
+
+/// List all available tools from MCP servers
+#[tauri::command]
+fn mcp_list_tools(state: State<'_, AppState>) -> Result<Vec<mcp::Tool>, String> {
+    let mcp_guard = state
+        .mcp
+        .lock()
+        .map_err(|_| "Failed to lock MCP manager".to_string())?;
+
+    match mcp_guard.as_ref() {
+        Some(manager) => Ok(manager.get_tools()),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Get MCP server status
+#[tauri::command]
+fn mcp_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let mcp_guard = state
+        .mcp
+        .lock()
+        .map_err(|_| "Failed to lock MCP manager".to_string())?;
+
+    match mcp_guard.as_ref() {
+        Some(manager) => Ok(manager.is_connected()),
+        None => Ok(false),
+    }
+}
+
+// ============================================================================
 // Legacy Commands
 // ============================================================================
 
@@ -523,6 +632,7 @@ pub fn run() {
         config: Mutex::new(app_config.clone()),
         context: Mutex::new(ContextManager::new(app_config.context.max_lines)),
         llm: Mutex::new(None),
+        mcp: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -557,6 +667,11 @@ pub fn run() {
             context_apply_summary,
             context_get_summary,
             context_summarize,
+            // MCP commands
+            mcp_start_servers,
+            mcp_stop_servers,
+            mcp_list_tools,
+            mcp_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

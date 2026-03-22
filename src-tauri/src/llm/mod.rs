@@ -171,6 +171,44 @@ struct OllamaModel {
 }
 
 // ============================================================================
+// Tool Types (for MCP integration)
+// ============================================================================
+
+/// Tool definition for LLM tool calling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl Tool {
+    pub fn new(name: &str, description: &str, input_schema: serde_json::Value) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema,
+        }
+    }
+}
+
+/// A tool call returned by the LLM
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Stream delta for chat responses (content or tool call)
+#[derive(Debug, Clone)]
+pub enum ChatDelta {
+    Content(String),
+    ToolCall(ToolCall),
+    Done,
+}
+
+// ============================================================================
 // OpenAI API Types
 // ============================================================================
 
@@ -179,6 +217,8 @@ struct OpenAiChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Tool>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +245,21 @@ struct OpenAiChoice {
 struct OpenAiDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "function")]
+    function: OpenAiToolCallFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 // ============================================================================
@@ -280,13 +335,14 @@ impl LlmClient {
     pub async fn chat_stream(
         &self,
         messages: Vec<ChatMessage>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, LlmError>> + Send>>, LlmError> {
+        tools: Option<Vec<Tool>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatDelta, LlmError>> + Send>>, LlmError> {
         match &self.provider {
             LlmProvider::Ollama { host, model } => {
                 self.ollama_chat_stream(host, model, messages).await
             }
             LlmProvider::OpenAi { api_base, model, api_key } => {
-                self.openai_chat_stream(api_base, api_key, model, messages).await
+                self.openai_chat_stream(api_base, api_key, model, messages, tools).await
             }
         }
     }
@@ -328,7 +384,7 @@ impl LlmClient {
         host: &str,
         model: &str,
         messages: Vec<ChatMessage>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, LlmError>> + Send>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatDelta, LlmError>> + Send>>, LlmError> {
         let url = format!("{}/api/chat", host);
 
         let request = OllamaChatRequest {
@@ -369,9 +425,10 @@ impl LlmClient {
                             match serde_json::from_str::<OllamaChatResponse>(&line) {
                                 Ok(chunk) => {
                                     if let Some(message) = chunk.message {
-                                        yield Ok(message.content);
+                                        yield Ok(ChatDelta::Content(message.content));
                                     }
                                     if chunk.done {
+                                        yield Ok(ChatDelta::Done);
                                         break;
                                     }
                                 }
@@ -421,13 +478,15 @@ impl LlmClient {
         api_key: &str,
         model: &str,
         messages: Vec<ChatMessage>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, LlmError>> + Send>>, LlmError> {
+        tools: Option<Vec<Tool>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatDelta, LlmError>> + Send>>, LlmError> {
         let url = format!("{}/chat/completions", api_base);
 
         let request = OpenAiChatRequest {
             model: model.to_string(),
             messages,
             stream: true,
+            tools,
         };
 
         let response = self
@@ -480,8 +539,22 @@ impl LlmClient {
                             match serde_json::from_str::<OpenAiChatChunk>(data) {
                                 Ok(chunk) => {
                                     for choice in chunk.choices {
+                                        // Yield content if present
                                         if let Some(content) = choice.delta.content {
-                                            yield Ok(content);
+                                            yield Ok(ChatDelta::Content(content));
+                                        }
+                                        // Yield tool calls if present
+                                        if let Some(tool_calls) = choice.delta.tool_calls {
+                                            for tc in tool_calls {
+                                                // Parse arguments JSON
+                                                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                                yield Ok(ChatDelta::ToolCall(ToolCall {
+                                                    id: tc.id,
+                                                    name: tc.function.name,
+                                                    arguments,
+                                                }));
+                                            }
                                         }
                                     }
                                 }

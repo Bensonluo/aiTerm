@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -117,12 +118,51 @@ impl Default for ContextConfig {
     }
 }
 
+/// MCP server configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: None,
+        }
+    }
+}
+
+/// MCP configuration for managing server connections
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    pub servers: Vec<McpServerConfig>,
+    pub max_iterations: usize,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            max_iterations: 10,
+        }
+    }
+}
+
 /// Main application configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub terminal: TerminalConfig,
     pub context: ContextConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Default for AppConfig {
@@ -131,6 +171,7 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             terminal: TerminalConfig::default(),
             context: ContextConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }

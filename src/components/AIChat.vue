@@ -15,7 +15,7 @@ const aiStore = useAIStore()
 // Refs
 const messagesContainer = ref<HTMLDivElement | null>(null)
 const inputText = ref('')
-const isCollapsed = ref(false)
+const isCollapsed = ref(true)
 
 // Computed
 const panelWidth = computed(() => isCollapsed.value ? '40px' : '350px')
